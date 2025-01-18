@@ -14,6 +14,10 @@ type Match struct {
 	Price      float64
 }
 
+func (m Match) String() string {
+	return fmt.Sprintf("{Ask: %v, Bid: %v, SizeFilled: %v, Price: %v}", m.Ask, m.Bid, m.SizeFilled, m.Price)
+}
+
 type Order struct {
 	Size      float64
 	Bid       bool
@@ -43,6 +47,10 @@ func NewOrder(bid bool, size float64) *Order {
 
 func (o *Order) String() string {
 	return fmt.Sprintf("[size: %.2f]", o.Size)
+}
+
+func (o *Order) IsFilled() bool {
+	return o.Size == 0.0
 }
 
 type Limit struct {
@@ -111,9 +119,58 @@ func (l *Limit) DeleteOrder(o *Order) {
 	sort.Sort(l.Orders)
 }
 
+func (l *Limit) Fill(o *Order) []Match {
+	matches := []Match{}
+
+	for _, order := range l.Orders {
+		match := l.fillOrder(order, o)
+		l.TotalVolume -= match.SizeFilled
+		matches = append(matches, match)
+
+		if o.IsFilled() {
+			break
+		}
+	}
+
+	return matches
+}
+
+func (l *Limit) fillOrder(a, b *Order) Match {
+	var (
+		bid        *Order
+		ask        *Order
+		sizeFilled float64
+	)
+
+	if a.Bid {
+		bid = a
+		ask = b
+	} else {
+		bid = b
+		ask = a
+	}
+
+	if a.Size >= b.Size {
+		a.Size -= b.Size
+		sizeFilled = b.Size
+		b.Size = 0.0
+	} else {
+		b.Size -= a.Size
+		sizeFilled = a.Size
+		a.Size = 0.0
+	}
+
+	return Match{
+		Bid:        bid,
+		Ask:        ask,
+		SizeFilled: sizeFilled,
+		Price:      l.Price,
+	}
+}
+
 type Orderbook struct {
-	Asks []*Limit
-	Bids []*Limit
+	asks []*Limit
+	bids []*Limit
 
 	AskLimits map[float64]*Limit
 	BidLimits map[float64]*Limit
@@ -121,25 +178,38 @@ type Orderbook struct {
 
 func NewOrderbook() *Orderbook {
 	return &Orderbook{
-		Asks:      []*Limit{},
-		Bids:      []*Limit{},
+		asks:      []*Limit{},
+		bids:      []*Limit{},
 		AskLimits: make(map[float64]*Limit),
 		BidLimits: make(map[float64]*Limit),
 	}
 }
 
-func (ob *Orderbook) PlaceOrder(price float64, o *Order) []Match {
-	// try matching the order
+func (ob *Orderbook) PlaceMarketOrder(o *Order) []Match {
+	matches := []Match{}
 
-	// add the rest of the order to the books
-	if o.Size > 0.0 {
-		ob.add(price, o)
+	if o.Bid {
+		if o.Size > ob.AskTotalVolume() {
+			panic(fmt.Errorf("not enough volume [size: %.2f] for market order [size: %.2f]", ob.AskTotalVolume(), o.Size))
+		}
+		for _, limit := range ob.Asks() {
+			limitMatches := limit.Fill(o)
+			matches = append(matches, limitMatches...)
+		}
+	} else {
+		if o.Size > ob.BidTotalVolume() {
+			panic(fmt.Errorf("not enough volume [size: %.2f] for market order [size: %.2f]", ob.AskTotalVolume(), o.Size))
+		}
+		for _, limit := range ob.Bids() {
+			limitMatches := limit.Fill(o)
+			matches = append(matches, limitMatches...)
+		}
 	}
 
-	return []Match{}
+	return matches
 }
 
-func (ob *Orderbook) add(price float64, o *Order) {
+func (ob *Orderbook) PlaceLimitOrder(price float64, o *Order) {
 	var limit *Limit
 	if o.Bid {
 		limit = ob.BidLimits[price]
@@ -152,11 +222,45 @@ func (ob *Orderbook) add(price float64, o *Order) {
 		limit.AddOrder(o)
 
 		if o.Bid {
-			ob.Bids = append(ob.Bids, limit)
+			ob.bids = append(ob.bids, limit)
 			ob.BidLimits[price] = limit
 		} else {
-			ob.Asks = append(ob.Asks, limit)
+			ob.asks = append(ob.asks, limit)
 			ob.AskLimits[price] = limit
 		}
 	}
+}
+
+func (ob *Orderbook) BidTotalVolume() float64 {
+	totalVolume := 0.0
+
+	for i := 0; i < len(ob.bids); i++ {
+		totalVolume += ob.bids[i].TotalVolume
+	}
+
+	return totalVolume
+}
+
+func (ob *Orderbook) AskTotalVolume() float64 {
+	totalVolume := 0.0
+
+	for i := 0; i < len(ob.asks); i++ {
+		totalVolume = ob.asks[i].TotalVolume
+	}
+
+	return totalVolume
+}
+
+func (ob *Orderbook) Asks() []*Limit {
+	// try matching the order
+	sort.Sort(ByBestAsk{ob.asks})
+
+	return ob.asks
+}
+
+func (ob *Orderbook) Bids() []*Limit {
+	// try matching the order
+	sort.Sort(ByBestBid{ob.bids})
+
+	return ob.bids
 }
